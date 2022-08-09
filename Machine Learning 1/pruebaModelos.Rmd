@@ -1,0 +1,367 @@
+---
+title: "Clasificación"
+author: "Author"
+date: "DD/MM/YYYY"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+ En la editorial ___, en su proceso de digitalización y modernización, quieren integrar modelos de Machine Learning dentro de su sistema de edición de los libros. En concreto, están muy interesados en poder identificar de forma automática cuales son ciertas propiedades de sus libros automáticamente.
+ 
+ Para esto te han pedido que desarrolles un informe básico en el que se incluyan los siguientes puntos:
+ 
+ * Un brevevanálisis de las variables en el que se incluya alguna visualización tanto univariante como multivariante.
+ * La ejecución de diversos modelos para poder predecir la popularidad de un libro (esta popularidad se calculará con el número de veces que los usuarios hayan valorado (independientemente de la valoración) un libro) -> group ~ rating + genre + reviewCount.
+  1. Regresión multinomial
+  2. Árboles de decisión
+  3. KNN
+  4. SVM
+  5. Neural Networks
+ * Presentación de resultados y conclusiones.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Análisis de variables
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+
+datos = read.csv("data/books.csv")
+
+datos = datos %>%
+  mutate(quantile = ntile(ratingCount, 4))
+
+names(datos)[names(datos) == 'quantile'] <- 'group'
+
+str(datos)
+
+datos$group =factor(datos$group, levels = c("1", "2", "3", "4"), labels = c("G1", "G2", "G3", "G4"))
+
+datos[,c(7)] = lapply(datos[c(7)], factor)
+
+datos = datos[,c(1,2,4,6,7,9)]
+
+summary(datos)
+```
+
+```{r}
+#Buscamos posibles valores ausentes:
+any(is.na(datos))
+
+```
+
+```{r}
+ggpairs(datos[,c(-1,-2)], cardinality_threshold = 30)
+
+```
+
+```{r}
+p1 = ggplot(data= datos,aes(y = rating , x = group, color = group)) +
+  geom_violin() +
+  geom_boxplot() 
+
+
+p1
+
+```
+
+
+```{r}
+p2 = ggplot(data= datos,aes(y =group , x =  reviewCount, color = group)) +
+  geom_point(position = position_jitter(w = 0, h = 0.02))
+
+p2
+
+p3 = ggplot(data= datos,aes(y =group , x =  rating, color = group)) +
+  geom_point(position = position_jitter(w = 0, h = 0.02))
+
+p3
+
+```
+
+
+
+```{r}
+p1 = ggplot(data = datos, aes(x = genre, y = rating, color = group)) +
+  geom_point()
+
+p1
+```
+
+# Modelos
+#regresion multinomial
+```{r}
+modeloTotal = glm(group ~ rating + genre + reviewCount, data = datos, family = "binomial")
+summary(modeloTotal)
+
+#plot(x = InsulintNotNull$SKINTHICKNESS, y = InsulintNotNull$INSULIN, fill = InsulintNotNull$DIABETES)
+
+
+```
+
+```{r}
+library(caret)
+library(ggplot2)
+library(ROCR) #for plotting ROC curves.
+library(MLTools)
+
+trainIndex <- createDataPartition(datos$group,      
+                                  p = 0.8,      
+                                  list = FALSE, 
+                                  times = 1)  
+
+inputs <- 3:6
+fTR <- datos[trainIndex,inputs]
+fTS <- datos[-trainIndex,inputs] #lo que vamos a usar con el predict 
+
+ctrl <- trainControl(method = "cv",                        
+                     number = 10,                          
+                     summaryFunction = defaultSummary,     
+                     classProbs = TRUE)  
+```
+
+
+## Arbol de decisión
+````{r}
+
+#10 fold cross validation. 
+
+library(rpart)
+library(rpart.plot)
+library(partykit)
+set.seed(150)
+tree.fit <- train(x = fTR[,1:3],  #Input variables.
+                 y = fTR$group,   #Output variable
+                 method = "rpart",   #Decision tree with cp as tuning parameter
+                 control = rpart.control(minsplit = 5,  # Minimum number of obs in node to keep cutting
+                                        minbucket = 5), # Minimum number of obs in a terminal node
+                 parms = list(split = "gini"),          # impuriry measure
+                 #tuneGrid = data.frame(cp = 0.1), # TRY this: tuneGrid = data.frame(cp = 0.25),
+                 #tuneLength = 10,
+                 tuneGrid = data.frame(cp = seq(0,0.1,0.0005)),
+                 trControl = ctrl, 
+                 metric = "Accuracy")
+
+#el modelo calcula de manera automática el cp con el que el accurace es mas alto, en este caso cp = 0.0575
+
+tree.fit 
+ggplot(tree.fit) 
+summary(tree.fit)  
+tree.fit$finalModel 
+plot(tree.fit$finalModel, uniform = TRUE, margin = 0.1)
+text(tree.fit$finalModel, use.n = TRUE, all = TRUE, cex = .8)
+#Advanced plots
+rpart.plot(tree.fit$finalModel, type = 2, fallen.leaves = FALSE, box.palette = "Oranges")
+tree.fit.party <- as.party(tree.fit$finalModel)
+plot(tree.fit.party)
+
+
+varImp(tree.fit,scale = FALSE)
+plot(varImp(tree.fit,scale = FALSE))
+
+
+fTR_eval <- fTR
+fTR_eval$tree_prob <- predict(tree.fit, type="prob", newdata = fTR) # predict probabilities
+fTR_eval$tree_pred <- predict(tree.fit, type="raw", newdata = fTR) # predict classes 
+#test
+fTS_eval <- fTS
+fTS_eval$tree_prob <- predict(tree.fit, type="prob", newdata = fTS) # predict probabilities
+fTS_eval$tree_pred <- predict(tree.fit, type="raw", newdata = fTS) # predict classes 
+
+# Training
+confusionMatrix(data = fTR_eval$tree_pred, #Predicted classes
+                reference = fTR_eval$group, #Real observations
+                positive = "Yes") #Class labeled as Positive
+# test
+confusionMatrix(fTS_eval$tree_pred, 
+                fTS_eval$group, 
+                positive = "Yes")
+
+````
+
+#knn
+
+```{r}
+#-------------------------------------------------------------------------------------------------
+#---------------------------- KNN MODEL  ----------------------------------------------
+#-------------------------------------------------------------------------------------------------
+set.seed(150) #For replication
+#Train knn model model.
+#Knn contains 1 tuning parameter k (number of neigbors). Three options:
+#  - Train with a fixed parameter: tuneGrid = data.frame(k = 5),
+#  - Try with a range of values specified in tuneGrid: tuneGrid = data.frame(k = seq(2,120,4)),
+#  - Caret chooses 10 values: tuneLength = 10,
+knn.fit = train(form = group ~ ., #formula for specifying inputs and outputs.
+                data = fTR,   #Training dataset 
+                method = "knn",
+                preProcess = c("center","scale"),
+                #tuneGrid = data.frame(k = 47),
+                tuneGrid = data.frame(k = seq(3,115,2)),
+                #tuneLength = 10,
+                trControl = ctrl, 
+                metric = "Accuracy")
+knn.fit #information about the settings
+ggplot(knn.fit) #plot the summary metric as a function of the tuning parameter
+knn.fit$finalModel #information about final model trained
+
+
+p1=ggplot(knn.fit)
+p1
+## Evaluate model --------------------------------------------------------------------------------
+#Evaluate the model with training and test sets
+#training
+fTR_eval$knn_prob <- predict(knn.fit, type="prob" , newdata = fTR) # predict probabilities
+fTR_eval$knn_pred <- predict(knn.fit, type="raw" , newdata = fTR) # predict classes 
+#test
+fTS_eval$knn_prob <- predict(knn.fit, type="prob" , newdata = fTS) # predict probabilities
+fTS_eval$knn_pred <- predict(knn.fit, type="raw" , newdata = fTS) # predict classes
+
+## Performance measures --------------------------------------------------------------------------------
+
+#######confusion matices
+# Training
+confusionMatrix(fTR_eval$knn_pred, #Predicted classes
+                fTR_eval$group, #Real observations
+                positive = "Yes") #Class labeled as Positive
+# test
+confusionMatrix(fTS_eval$knn_pred, 
+                fTS_eval$group, 
+                positive = "Yes")
+
+
+```
+
+#SVM (support vector machines) radial
+
+````{r}
+
+#-------------------------------------------------------------------------------------------------
+#---------------------------- SVM RADIAL ------------------------------------------------------
+#-------------------------------------------------------------------------------------------------
+  
+
+library(kernlab)
+ #For replication
+#Train model using training data
+#Train radial  svm
+#svm contains 2 tuning parameter C (Cost) and sigma. Three options:
+#  - Train with a fixed parameter: tuneGrid = data.frame( sigma=100, C=1),
+#  - Try with a range of values specified in tuneGrid: tuneGrid = expand.grid(C = seq(0.1,100,length.out = 8), sigma=seq(0.01,50,length.out = 4)),
+#  - Caret chooses 10 values: tuneLength = 10,
+svm.fit = train(form = group ~ ., #formula for specifying inputs and outputs.
+                data = fTR,   #Training dataset 
+                method = "svmRadial",
+                preProcess = c("center","scale"),
+                tuneGrid = expand.grid(C = c(0.001,0.01,0.1,1,10,100,1000), sigma=c(0.0001,0.001,0.01,0.1,1,10)),
+                #tuneGrid =  data.frame(sigma = 0.01, C = 0.1),  
+                #tuneGrid = expand.grid(C = seq(0.1,1000,length.out = 8), sigma=seq(0.01,50,length.out = 4)),
+                #tuneLength = 10,
+                trControl = ctrl, 
+                metric = "Accuracy")
+svm.fit #information about the resampling settings
+ggplot(svm.fit) + scale_x_log10()
+svm.fit$finalModel #information about the model trained
+#Plot the svm support vectors:
+isupvect <- alphaindex(svm.fit$finalModel)[[1]] #indexes for support vectors
+
+
+## Evaluate model --------------------------------------------------------------------------------
+#Evaluate the model with training and test sets
+#training
+fTR_eval <- fTR
+fTR_eval$svm_prob <- predict(svm.fit, type="prob", newdata = fTR) # predict probabilities
+fTR_eval$svm_pred <- predict(svm.fit, type="raw", newdata = fTR) # predict classes 
+#test
+fTS_eval <- fTS
+fTS_eval$svm_prob <- predict(svm.fit, type="prob", newdata = fTS) # predict probabilities
+fTS_eval$svm_pred <- predict(svm.fit, type="raw", newdata = fTS) # predict classes 
+
+
+
+## Performance measures --------------------------------------------------------------------------------
+
+#######confusion matices
+# Training
+confusionMatrix(data = fTR_eval$svm_pred, #Predicted classes
+                reference = fTR_eval$group, #Real observations
+                positive = "YES") #Class labeled as Positive
+# test
+confusionMatrix(fTS_eval$svm_pred, 
+                fTS_eval$group, 
+                positive = "YES")
+
+
+
+```
+
+##nn
+
+```{r}
+#-------------------------------------------------------------------------------------------------
+#-------------------------------- MLP ------------------------------------------------------------
+#-------------------------------------------------------------------------------------------------
+library(NeuralNetTools) ##Useful tools for plotting and analyzing neural networks
+library(nnet)
+#Train MLP
+#mlp contains 2 tuning parameters size and decay Three options:
+#  - Train with a fixed parameter: tuneGrid = data.frame(size =5, decay = 0),
+#  - Try with a range of values specified in tuneGrid: tuneGrid = expand.grid(size = seq(5,25,length.out = 5), decay=c(10^(-9),0.0001,0.001,0.01,0.1,1,10)),
+#  - Caret chooses 10 values: tuneLength = 10,
+set.seed(150) #For replication
+mlp.fit = train(form = group ~ ., #formula for specifying inputs and outputs.
+                data = fTR,   #Training dataset 
+                method = "nnet",
+                preProcess = c("center","scale"),
+                maxit = 250,    # Maximum number of iterations
+                #tuneGrid = expand.grid(size = seq(5,30,by = 5),
+                                       #decay=c(10^(-9),0.0001,0.001,0.01,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1,1.1,1.2,1.3,1.4,1.5,1.6,1.7,1.8,1.9,2.0)),
+                tuneGrid = data.frame(size =10, decay = 0.9),
+                #tuneGrid = expand.grid(size=seq(5,30,by= 5),
+                                #decay=c(0.05,0.06,0.07,0.08,0.09,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5)),
+                                            #2.1,2.2,2.3,2.4,2.5,2.6,2.7,2.8,2.9,3.0,3.1,3.2,3.3,3.4,3.5,3.6,3.7,3.8,3.9,4.0,4.1,4.2,4.3,4.4,4.5,4.6,4.7,4.8,4.9,5.0)),
+                trControl = ctrl, 
+                metric = "Accuracy")
+mlp.fit #information about the resampling settings
+#ggplot(mlp.fit)
+
+
+mlp.fit$finalModel #information about the model trained
+summary(mlp.fit$finalModel) #information about the network and weights
+plotnet(mlp.fit$finalModel) #Plot the network
+library(NeuralSens)
+#Statistical sensitivity analysis
+hmax=1000
+bw.bcv(x=c(0:1000),lower = 0.1*hmax,upper =hmax ) 
+SensAnalysisMLP(mlp.fit)
+
+## Evaluate model --------------------------------------------------------------------------------
+#Evaluate the model with training and test sets
+#training
+fTR_eval = fTR
+fTR_eval$mlp_prob = predict(mlp.fit, type="prob" , newdata = fTR) # predict probabilities
+fTR_eval$mlp_pred = predict(mlp.fit, type="raw" , newdata = fTR) # predict classes 
+#test
+fTS_eval = fTS
+fTS_eval$mlp_prob = predict(mlp.fit, type="prob" , newdata = fTS) # predict probabilities
+fTS_eval$mlp_pred = predict(mlp.fit, type="raw" , newdata = fTS) # predict classes 
+
+## Performance measures --------------------------------------------------------------------------------
+
+#######confusion matices
+# Training
+confusionMatrix(data = fTR_eval$mlp_pred, #Predicted classes
+                reference = fTR_eval$group, #Real observations
+                positive = "Yes") #Class labeled as Positive
+# test
+confusionMatrix(fTS_eval$mlp_pred, 
+                fTS_eval$group, 
+                positive = "Yes")
+
+```
+
